@@ -11,6 +11,7 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,13 @@ export interface HttpServerOptions {
   validateBearerToken?: (token: string) => boolean;
   /** Verify OAuth bearer tokens and provide identity context to MCP handlers. */
   verifyBearerToken?: (token: string) => Promise<AuthInfo>;
+  /**
+   * Enables stateless mode: every POST /mcp gets a fresh McpServer + transport
+   * from this factory, so any number of clients (or reconnects) can initialize.
+   * GET/DELETE /mcp return 405 in this mode. When omitted, a single stateful
+   * session is served via the returned `transport`.
+   */
+  createMcpServer?: () => McpServer;
 }
 
 export interface HttpServerResult {
@@ -200,6 +208,7 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
     sseReauthIntervalMs = 5 * 60 * 1000,
     validateBearerToken,
     verifyBearerToken,
+    createMcpServer,
   } = options;
 
   if (!authToken) {
@@ -384,8 +393,32 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
         }
       }
 
+      // Stateless mode: no standalone SSE stream or session termination
+      if (createMcpServer && req.method !== "POST") {
+        res.setHeader("Allow", "POST");
+        sendJson(res, 405, {
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed." },
+          id: null,
+        });
+        return;
+      }
+
       // Delegate to SDK transport
       try {
+        if (createMcpServer) {
+          const requestTransport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined,
+          });
+          const requestServer = createMcpServer();
+          res.on("close", () => {
+            void requestTransport.close();
+            void requestServer.close();
+          });
+          await requestServer.connect(requestTransport);
+          await requestTransport.handleRequest(req, res, parsedBody);
+          return;
+        }
         await transport.handleRequest(req, res, parsedBody);
       } catch (error: unknown) {
         // If response hasn't been sent yet

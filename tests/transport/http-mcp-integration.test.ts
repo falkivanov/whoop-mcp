@@ -56,6 +56,36 @@ describe("HTTP transport — MCP integration", () => {
     }
   });
 
+  it("stateless mode lets multiple clients initialize independently", async () => {
+    const http = await createHttpServer({
+      authToken: "stateless-token",
+      port: 0,
+      createMcpServer: () => createWhoopServer(makeMockWhoopClient()).server,
+    });
+    const address = http.server.address();
+    if (!address || typeof address === "string") throw new Error("Missing port");
+    const url = new URL(`http://127.0.0.1:${address.port}/mcp`);
+    const clients = [1, 2, 3].map((i) => new Client({ name: `client-${i}`, version: "1" }));
+    try {
+      for (const client of clients) {
+        await client.connect(
+          new StreamableHTTPClientTransport(url, {
+            requestInit: { headers: { Authorization: "Bearer stateless-token" } },
+          })
+        );
+        const result = await client.callTool({ name: "get_profile", arguments: {} });
+        expect(result.isError).not.toBe(true);
+      }
+      const getResponse = await fetch(url, {
+        headers: { Authorization: "Bearer stateless-token" },
+      });
+      expect(getResponse.status).toBe(405);
+    } finally {
+      await Promise.all(clients.map((c) => c.close().catch(() => {})));
+      await http.close();
+    }
+  });
+
   let cleanup: (() => Promise<void>) | null = null;
 
   afterEach(async () => {

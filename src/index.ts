@@ -162,11 +162,12 @@ export async function main(telemetry?: Telemetry): Promise<void> {
 
   // 4. Create the MCP server with all WHOOP tools and resources
   const disableResources = process.env.WHOOP_MCP_DISABLE_RESOURCES === "1";
-  const { server } = createWhoopServer(client, {
+  const serverOptions = {
     disableResources,
     privacyMode,
     ...(telemetry?.status.enabled ? { telemetry } : {}),
-  });
+  };
+  const { server } = createWhoopServer(client, serverOptions);
 
   // 5. Connect transports based on MCP_TRANSPORT mode
   const httpResults: HttpServerResult[] = [];
@@ -250,8 +251,10 @@ export async function main(telemetry?: Telemetry): Promise<void> {
       healthCheck,
       oauthHandler,
       verifyBearerToken,
+      // Stateless: each request gets its own McpServer, so multiple clients
+      // (claude.ai chats, relay nodes, reconnects) can initialize independently.
+      createMcpServer: () => createWhoopServer(client, serverOptions).server,
     });
-    await server.connect(httpResult.transport);
     httpResults.push(httpResult);
 
     logger.info("http transport listening", {
