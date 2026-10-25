@@ -5,7 +5,8 @@
  * Pure I/O module — no dependencies on API client or OAuth flow.
  */
 
-import { mkdir, writeFile, readFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename, unlink } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -81,14 +82,25 @@ export function resolveTokenDirectory(tokenDir?: string): string {
  *
  * Creates the token directory (0700) if it doesn't exist, then writes
  * the token file with 0600 (user-only read/write) permissions.
+ *
+ * The write is atomic (temp file + rename) so concurrent readers never see a
+ * partially written file and concurrent writers cannot interleave content.
  */
 export async function saveTokens(tokens: OAuthTokens, tokenDir?: string): Promise<void> {
   const dir = resolveTokenDirectory(tokenDir);
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writeFile(tokenFilePath(tokenDir), JSON.stringify(tokens, null, 2), {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
+  const filePath = tokenFilePath(tokenDir);
+  const tempPath = `${filePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    await writeFile(tempPath, JSON.stringify(tokens, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    await rename(tempPath, filePath);
+  } catch (error: unknown) {
+    await unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 /**

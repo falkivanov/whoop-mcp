@@ -19,8 +19,17 @@ export interface WhoopClientOptions {
   accessToken: string;
   /** Override base URL — useful for testing. Defaults to WHOOP_API_BASE_URL. */
   baseUrl?: string;
-  /** Callback to refresh the access token on 401. Returns a new access token. */
-  onTokenRefresh?: () => Promise<string>;
+  /**
+   * Callback to refresh the access token on 401. Receives the rejected token
+   * and returns a new access token. Must be safe to call concurrently.
+   */
+  onTokenRefresh?: (staleAccessToken: string) => Promise<string>;
+  /**
+   * Optional callback that re-reads the current access token from storage.
+   * Used once when a request still gets a 401 after refreshing (another
+   * process may have rotated the token in the meantime).
+   */
+  reloadAccessToken?: () => Promise<string | undefined>;
   /**
    * Optional structured logger for API call observability.
    * Successful calls log at `debug` with `durationMs`; 429 responses log at
@@ -274,17 +283,34 @@ export function createWhoopClient(options: WhoopClientOptions): WhoopClient {
       // 401: attempt token refresh once
       if (response.status === 401 && options.onTokenRefresh) {
         let newToken: string;
-        try {
-          newToken = await options.onTokenRefresh();
-          logger?.info("whoop token refreshed", logExtras({ url }));
-        } catch (refreshError: unknown) {
-          throw new WhoopAuthError(refreshError);
+        if (options.accessToken !== currentToken) {
+          // A concurrent request already refreshed — reuse its token.
+          newToken = options.accessToken;
+        } else {
+          try {
+            newToken = await options.onTokenRefresh(currentToken);
+            logger?.info("whoop token refreshed", logExtras({ url }));
+          } catch (refreshError: unknown) {
+            throw new WhoopAuthError(refreshError);
+          }
+          options.accessToken = newToken;
         }
 
         // Retry with the new token
-        options.accessToken = newToken;
         currentToken = newToken;
-        const retryResponse = await doFetch(url, newToken);
+        let retryResponse = await doFetch(url, newToken);
+
+        // Still 401 — the token may have been rotated elsewhere; retry once
+        // with the token currently on disk.
+        if (retryResponse.status === 401 && options.reloadAccessToken) {
+          const reloadedToken = await options.reloadAccessToken();
+          if (reloadedToken && reloadedToken !== newToken) {
+            options.accessToken = reloadedToken;
+            currentToken = reloadedToken;
+            retryResponse = await doFetch(url, reloadedToken);
+          }
+        }
+
         if (retryResponse.ok) {
           return (await retryResponse.json()) as T;
         }

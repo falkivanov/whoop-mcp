@@ -722,6 +722,92 @@ describe("createWhoopClient", () => {
       expect(onTokenRefresh).toHaveBeenCalledTimes(1);
       expect(mockFetch).toHaveBeenCalledTimes(3);
     });
+
+    it("passes the rejected token to onTokenRefresh", async () => {
+      mockFetch
+        .mockResolvedValueOnce(mock401Response())
+        .mockResolvedValueOnce(mockJsonResponse({ user_id: 42 }));
+      const onTokenRefresh = vi.fn().mockResolvedValue("new_token");
+      const client = createWhoopClient({
+        accessToken: TEST_TOKEN,
+        baseUrl: TEST_BASE_URL,
+        onTokenRefresh,
+      });
+
+      await client.get("/v2/user/profile/basic");
+
+      expect(onTokenRefresh).toHaveBeenCalledWith(TEST_TOKEN);
+    });
+
+    it("reuses a token refreshed by a concurrent request", async () => {
+      const NEW_TOKEN = "refreshed_by_other_request";
+      let staleCalls = 0;
+      mockFetch.mockImplementation((_url: string, init?: RequestInit) => {
+        const authHeader = (init?.headers as Record<string, string>)["Authorization"];
+        if (authHeader === `Bearer ${NEW_TOKEN}`) {
+          return Promise.resolve(mockJsonResponse({ user_id: 42 }) as unknown as Response);
+        }
+        // The second request's 401 arrives after the first one already refreshed.
+        const delayMs = staleCalls++ === 0 ? 0 : 30;
+        return new Promise<Response>((resolve) =>
+          setTimeout(() => resolve(mock401Response()), delayMs)
+        );
+      });
+      const onTokenRefresh = vi.fn().mockResolvedValue(NEW_TOKEN);
+      const client = createWhoopClient({
+        accessToken: TEST_TOKEN,
+        baseUrl: TEST_BASE_URL,
+        onTokenRefresh,
+      });
+
+      const results = await Promise.all([
+        client.get<{ user_id: number }>("/v2/user/profile/basic"),
+        client.get<{ user_id: number }>("/v2/user/profile/basic"),
+      ]);
+
+      expect(results.map((r) => r.user_id)).toEqual([42, 42]);
+      expect(onTokenRefresh).toHaveBeenCalledOnce();
+    });
+
+    it("retries once with the reloaded token after a second 401", async () => {
+      mockFetch
+        .mockResolvedValueOnce(mock401Response())
+        .mockResolvedValueOnce(mock401Response())
+        .mockResolvedValueOnce(mockJsonResponse({ user_id: 42 }));
+      const onTokenRefresh = vi.fn().mockResolvedValue("refreshed_token");
+      const reloadAccessToken = vi.fn().mockResolvedValue("token_from_disk");
+      const client = createWhoopClient({
+        accessToken: TEST_TOKEN,
+        baseUrl: TEST_BASE_URL,
+        onTokenRefresh,
+        reloadAccessToken,
+      });
+
+      const result = await client.get<{ user_id: number }>("/v2/user/profile/basic");
+
+      expect(result.user_id).toBe(42);
+      expect(reloadAccessToken).toHaveBeenCalledOnce();
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      const lastCall = mockFetch.mock.calls[2] as [string, RequestInit];
+      expect(lastCall[1].headers).toEqual(
+        expect.objectContaining({ Authorization: "Bearer token_from_disk" })
+      );
+    });
+
+    it("does not retry again when the reloaded token equals the refreshed one", async () => {
+      mockFetch.mockResolvedValueOnce(mock401Response()).mockResolvedValueOnce(mock401Response());
+      const onTokenRefresh = vi.fn().mockResolvedValue("refreshed_token");
+      const reloadAccessToken = vi.fn().mockResolvedValue("refreshed_token");
+      const client = createWhoopClient({
+        accessToken: TEST_TOKEN,
+        baseUrl: TEST_BASE_URL,
+        onTokenRefresh,
+        reloadAccessToken,
+      });
+
+      await expect(client.get("/v2/recovery")).rejects.toThrow(WhoopApiError);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
   });
 
   // -------------------------------------------------------------------------

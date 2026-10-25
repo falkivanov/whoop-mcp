@@ -29,6 +29,7 @@ const mockSaveTokens = vi.fn();
 vi.mock("../src/auth/token-store.js", () => ({
   loadTokens: (...args: unknown[]) => mockLoadTokens(...args),
   saveTokens: (...args: unknown[]) => mockSaveTokens(...args),
+  isTokenExpired: (tokens: { expires_at: number }) => tokens.expires_at <= Date.now(),
 }));
 
 const mockCreateWhoopClient = vi.fn();
@@ -405,7 +406,7 @@ describe("main() entry point", () => {
         })
       );
       expect(mockToOAuthTokens).toHaveBeenCalledWith(refreshResponse, "stored-refresh-token");
-      expect(mockSaveTokens).toHaveBeenCalledWith(newTokens);
+      expect(mockSaveTokens).toHaveBeenCalledWith(newTokens, undefined);
       expect(newAccessToken).toBe("new-access-token");
     });
 

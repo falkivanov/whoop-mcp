@@ -16,9 +16,9 @@
  * All logging goes to stderr — stdout is reserved for the MCP stdio channel.
  */
 
-import { authenticate, refreshAccessToken, toOAuthTokens } from "./auth/oauth.js";
+import { authenticate } from "./auth/oauth.js";
 import type { OAuthConfig } from "./auth/oauth.js";
-import { loadTokens, saveTokens } from "./auth/token-store.js";
+import { createTokenRefresher } from "./auth/token-refresher.js";
 import { createWhoopClient } from "./api/client.js";
 import type { WhoopClient, WhoopGetOptions } from "./api/client.js";
 import { MemoryCache } from "./cache/memory-cache.js";
@@ -123,23 +123,14 @@ export async function main(telemetry?: Telemetry): Promise<void> {
   // and the MCP resources; it is cleared whenever tokens are refreshed.
   const cache = new MemoryCache();
 
-  const onTokenRefresh = async (): Promise<string> => {
-    const tokens = await loadTokens();
-    if (!tokens) {
-      throw new Error(
-        "Token refresh failed: no stored tokens found. Re-authentication may be required."
-      );
-    }
-
-    const refreshed = await refreshAccessToken(tokens.refresh_token, oauthConfig);
-    const newTokens = toOAuthTokens(refreshed, tokens.refresh_token);
-    await saveTokens(newTokens);
-
-    cache.clear();
-    logger.info("whoop token refreshed");
-
-    return newTokens.access_token;
-  };
+  // One refresher per process: all request servers share it, so concurrent
+  // 401s trigger a single refresh instead of racing on the rotating refresh token.
+  const tokenRefresher = createTokenRefresher(oauthConfig, {
+    onRefreshed: () => {
+      cache.clear();
+      logger.info("whoop token refreshed");
+    },
+  });
 
   let authenticatedClientPromise: Promise<WhoopClient> | undefined;
   const getAuthenticatedClient = (): Promise<WhoopClient> => {
@@ -148,7 +139,13 @@ export async function main(telemetry?: Telemetry): Promise<void> {
       const accessToken = await authenticate(oauthConfig);
       console.error("Authentication successful.");
       logger.info("whoop authentication complete");
-      return createWhoopClient({ accessToken, onTokenRefresh, logger, cache });
+      return createWhoopClient({
+        accessToken,
+        onTokenRefresh: tokenRefresher.refresh,
+        reloadAccessToken: tokenRefresher.reload,
+        logger,
+        cache,
+      });
     })();
     return authenticatedClientPromise;
   };
