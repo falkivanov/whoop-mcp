@@ -729,6 +729,29 @@ describe("createOAuthApp (integration)", () => {
       await ctx.close();
     }
   });
+
+  it("password page CSP form-action allows the redirect back to the client origin", async () => {
+    // Browsers apply form-action to the redirect that follows the POST, so
+    // 'self' alone silently blocks the 302 to e.g. https://claude.ai.
+    const ctx = await startApp();
+    try {
+      const url = new URL(`${ctx.baseUrl}/authorize`);
+      url.searchParams.set("client_id", ctx.clientId);
+      url.searchParams.set("redirect_uri", ctx.redirectUri);
+      url.searchParams.set("response_type", "code");
+      url.searchParams.set("code_challenge", "abc");
+      url.searchParams.set("code_challenge_method", "S256");
+      const res = await fetch(url, { redirect: "manual" });
+      const csp = res.headers.get("content-security-policy") ?? "";
+      const formAction = csp
+        .split(";")
+        .map((d) => d.trim())
+        .find((d) => d.startsWith("form-action"));
+      expect(formAction).toBe("form-action 'self' https://claude.ai");
+    } finally {
+      await ctx.close();
+    }
+  });
 });
 
 describe("Refresh token rotation (reuse detection)", () => {

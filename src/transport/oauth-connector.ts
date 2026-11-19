@@ -427,14 +427,31 @@ function renderPasswordPage(params: Record<string, string>, error?: string): str
 </html>`;
 }
 
+/**
+ * Origins the password form may end up at. Browsers enforce `form-action` on
+ * the redirect that follows the POST, so the allowlisted redirect URI origins
+ * (e.g. https://claude.ai) must be permitted alongside 'self'.
+ */
+function formActionSources(allowedRedirectUris: string[]): string {
+  const origins = new Set<string>();
+  for (const uri of allowedRedirectUris) {
+    try {
+      origins.add(new URL(uri).origin);
+    } catch {
+      // Invalid URIs are rejected elsewhere; never widen the CSP for them.
+    }
+  }
+  return ["'self'", ...origins].join(" ");
+}
+
 /** Apply anti-clickjacking + tight CSP headers to the password-prompt response. */
-function applyAuthorizePageHeaders(res: Response): void {
+function applyAuthorizePageHeaders(res: Response, formAction: string): void {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+    `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`
   );
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -497,6 +514,8 @@ export function createOAuthApp(options: CreateOAuthAppOptions): CreateOAuthAppRe
       scopes: options.scopes,
     });
 
+  const formAction = formActionSources(options.allowedRedirectUris);
+
   const app = express();
   app.disable("x-powered-by");
   if (options.trustProxy !== undefined) {
@@ -527,7 +546,7 @@ export function createOAuthApp(options: CreateOAuthAppOptions): CreateOAuthAppRe
       const v = req.query[k];
       if (typeof v === "string") params[k] = v;
     }
-    applyAuthorizePageHeaders(res);
+    applyAuthorizePageHeaders(res, formAction);
     res.status(200).send(renderPasswordPage(params));
   });
 
@@ -546,7 +565,7 @@ export function createOAuthApp(options: CreateOAuthAppOptions): CreateOAuthAppRe
           const v = body[k];
           if (typeof v === "string") params[k] = v;
         }
-        applyAuthorizePageHeaders(res);
+        applyAuthorizePageHeaders(res, formAction);
         res.status(401).send(renderPasswordPage(params, "Incorrect password. Try again."));
         return;
       }
